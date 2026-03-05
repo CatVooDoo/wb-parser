@@ -89,6 +89,101 @@ class WbParser
         return $images;
     }
 
+    private function fetchPrice(int $nmId): array
+    {
+        // Случайная задержка 1-3 секунды — обязательно!
+        $delay = random_int(1000000, 3000000);
+        usleep($delay);
+
+        $url = 'https://search.wb.ru/exactmatch/ru/common/v18/search';
+
+        $params = [
+            'appType'    => '1',
+            'curr'       => 'rub',
+            'dest'       => '-1257786',
+            'lang'       => 'ru',
+            'page'       => '1',
+            'query'      => (string) $nmId,
+            'resultset'  => 'catalog',
+            'sort'       => 'popular',
+            'spp'        => '30',
+        ];
+
+        $attempts = 3;
+        $lastException = null;
+
+        for ($i = 0; $i < $attempts; $i++) {
+            try {
+                $response = $this->client->get($url, [
+                    'query' => $params,
+                    'headers' => [
+                        'User-Agent'      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36',
+                        'Accept'          => 'application/json, text/plain, */*',
+                        'Accept-Language' => 'ru-RU,ru;q=0.9,en;q=0.8',
+                        'Accept-Encoding' => 'gzip, deflate, br',
+                        'Referer'         => 'https://www.wildberries.ru/',
+                        'Origin'          => 'https://www.wildberries.ru',
+                        'sec-ch-ua'       => '"Not_A Brand";v="8", "Chromium";v="121"',
+                        'sec-fetch-dest'  => 'empty',
+                        'sec-fetch-mode'  => 'cors',
+                        'sec-fetch-site'  => 'same-site',
+                    ],
+                ]);
+
+                $body = (string) $response->getBody();
+                $data = json_decode($body, true);
+
+                $products = $data['data']['products'] ?? [];
+
+                foreach ($products as $product) {
+                    if ((int) $product['id'] === $nmId) {
+                        $sizes = $product['sizes'] ?? [];
+                        $priceData = $sizes[0]['price'] ?? [];
+
+                        $basic   = isset($priceData['basic'])   ? (int) $priceData['basic']   : 0;
+                        $saleRaw = isset($priceData['product']) ? (int) $priceData['product'] : 0;
+
+                        if ($basic === 0) {
+                            return ['price_basic' => null, 'price_sale' => null, 'sale_percent' => null];
+                        }
+
+                        $priceBasic = round($basic / 100, 2);
+                        $priceSale  = round($saleRaw / 100, 2);
+                        $salePct    = (int) round(($basic - $saleRaw) / $basic * 100);
+
+                        return [
+                            'price_basic'  => $priceBasic,
+                            'price_sale'   => $priceSale,
+                            'sale_percent' => $salePct,
+                        ];
+                    }
+                }
+
+                return ['price_basic' => null, 'price_sale' => null, 'sale_percent' => null];
+
+            } catch (\GuzzleHttp\Exception\ClientException $e) {
+                if ($e->getResponse()->getStatusCode() === 429) {
+                    usleep(random_int(2000000, 4000000));
+                    $lastException = $e;
+                    continue;
+                }
+                break;
+
+            } catch (\GuzzleHttp\Exception\ConnectException $e) {
+                $lastException = $e;
+                usleep(1000000);
+                continue;
+
+            } catch (\Exception $e) {
+                $lastException = $e;
+                break;
+            }
+        }
+
+        error_log("WbParser fetchPrice failed for nmId={$nmId}: " . ($lastException?->getMessage() ?? 'unknown'));
+        return ['price_basic' => null, 'price_sale' => null, 'sale_percent' => null];
+    }
+
     public function parse(int $nmId): array
     {
         $card = $this->fetchCard($nmId);
@@ -107,15 +202,20 @@ class WbParser
             }
         }
 
+        $priceData = $this->fetchPrice($nmId);
+
         return [
-            'nm_id'       => $card['nm_id'] ?? $nmId,
-            'name'        => $card['imt_name'] ?? 'Без названия',
-            'brand'       => $card['selling']['brand_name'] ?? '',
-            'category'    => $card['subj_name'] ?? $card['subj_root_name'] ?? '',
-            'description' => $card['description'] ?? '',
-            'options'     => $options,
-            'images'      => $this->getImageUrls($nmId, 5),
-            'wb_url'      => 'https://www.wildberries.ru/catalog/' . $nmId . '/detail.aspx',
+            'nm_id'        => $card['nm_id'] ?? $nmId,
+            'name'         => $card['imt_name'] ?? 'Без названия',
+            'brand'        => $card['selling']['brand_name'] ?? '',
+            'category'     => $card['subj_name'] ?? $card['subj_root_name'] ?? '',
+            'description'  => $card['description'] ?? '',
+            'options'      => $options,
+            'images'       => $this->getImageUrls($nmId, 5),
+            'wb_url'       => 'https://www.wildberries.ru/catalog/' . $nmId . '/detail.aspx',
+            'price_basic'  => $priceData['price_basic'],
+            'price_sale'   => $priceData['price_sale'],
+            'sale_percent' => $priceData['sale_percent'],
         ];
     }
 }
@@ -437,6 +537,50 @@ if ($isAjax) {
             color: var(--text);
         }
 
+        .price-block {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            margin: 16px 0;
+        }
+
+        .price-sale {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: 'Unbounded', sans-serif;
+            color: #f0f0f0;
+        }
+
+        .price-basic {
+            font-size: 16px;
+            color: #888;
+            text-decoration: line-through;
+        }
+
+        .price-badge {
+            background: #cb11ab;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 700;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-family: 'Unbounded', sans-serif;
+        }
+
+        .price-unavailable {
+            font-size: 14px;
+            color: #888;
+            margin: 12px 0;
+            padding: 10px 14px;
+            border: 1px solid #2a2a2a;
+            border-radius: 8px;
+        }
+
+        .price-unavailable a {
+            color: #cb11ab;
+            text-decoration: none;
+        }
+
         .wb-btn {
             display: inline-flex;
             align-items: center;
@@ -654,8 +798,9 @@ if ($isAjax) {
             const hasImages = currentImages.length > 0;
             const hasDescription = data.description && data.description.trim();
             const hasOptions = data.options && data.options.length > 0;
+            const hasPrice = data.price_sale !== null || data.price_basic !== null;
 
-            const descriptionPreview = hasDescription 
+            const descriptionPreview = hasDescription
                 ? (data.description.length > 200 ? data.description.substring(0, 200) + '...' : data.description)
                 : '';
             const needsExpand = hasDescription && data.description.length > 200;
@@ -677,12 +822,46 @@ if ($isAjax) {
                 `;
             }
 
+            let priceHtml = '';
+            if (hasPrice) {
+                const { price_basic, price_sale, sale_percent } = data;
+                const formatPrice = (p) => new Intl.NumberFormat('ru-RU').format(p);
+
+                if (price_sale !== null && price_basic !== null && sale_percent > 0) {
+                    priceHtml = `
+                        <div class="price-block">
+                            <span class="price-sale">${formatPrice(price_sale)} ₽</span>
+                            <span class="price-basic">${formatPrice(price_basic)} ₽</span>
+                            <span class="price-badge">-${sale_percent}%</span>
+                        </div>
+                    `;
+                } else if (price_sale !== null) {
+                    priceHtml = `
+                        <div class="price-block">
+                            <span class="price-sale">${formatPrice(price_sale)} ₽</span>
+                        </div>
+                    `;
+                } else if (price_basic !== null) {
+                    priceHtml = `
+                        <div class="price-block">
+                            <span class="price-sale">${formatPrice(price_basic)} ₽</span>
+                        </div>
+                    `;
+                }
+            } else {
+                priceHtml = `
+                    <div class="price-unavailable">
+                        Цена временно недоступна — <a href="${escapeHtml(data.wb_url)}" target="_blank">смотрите на WB</a>
+                    </div>
+                `;
+            }
+
             resultContainer.innerHTML = `
                 <div class="result-card">
                     <div class="card-body">
                         <div class="gallery">
                             <div class="main-image" id="mainImage">
-                                ${hasImages 
+                                ${hasImages
                                     ? `<img src="${escapeHtml(data.images[0])}" alt="${escapeHtml(data.name)}" onerror="this.parentElement.innerHTML='<span class=\\'image-placeholder\\'>🖼️</span>'">`
                                     : '<span class="image-placeholder">🖼️</span>'
                                 }
@@ -705,6 +884,7 @@ if ($isAjax) {
                                     ${data.brand ? `<span>${escapeHtml(data.brand)}</span> • ` : ''}
                                     ${data.category ? `<span>${escapeHtml(data.category)}</span>` : ''}
                                 </p>
+                                ${priceHtml}
                                 <a href="${escapeHtml(data.wb_url)}" target="_blank" class="wb-btn">
                                     🛒 Открыть на WB
                                 </a>
